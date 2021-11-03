@@ -491,10 +491,56 @@ defmodule Commanded.Event.Handler do
       """
       def start_link(opts \\ []) do
         opts = Keyword.merge(@opts, opts)
+        IO.inspect(opts)
 
         {application, name, config} = Handler.parse_config!(__MODULE__, opts)
 
-        Handler.start_link(application, name, __MODULE__, config)
+        supervisor_name = Module.concat([__MODULE__, DynamicSupervisor])
+
+        consistency =
+          case opts[:consistency] ||
+                 Application.get_env(:commanded, :default_consistency, :eventual) do
+            consistency when consistency in [:eventual, :strong] -> consistency
+            invalid -> raise "Invalid `consistency` option: #{inspect(invalid)}"
+          end
+
+        # {:ok, pid} =
+        #   Registration.start_link(
+        #     application,
+        #     supervisor_name,
+        #     DynamicSupervisor,
+        #     [strategy: :one_for_one],
+        #     []
+        #   )
+        #   |> IO.inspect(label: supervisor_name)
+
+        {:ok, pid} = DynamicSupervisor.start_link(strategy: :one_for_one)
+
+        :ok = Subscriptions.register(application, name, __MODULE__, pid, consistency)
+
+        subscription =
+          Subscription.new(
+            application: application,
+            subscription_name: name,
+            subscribe_from: Keyword.get(opts, :start_from, :origin),
+            subscribe_to: Keyword.get(opts, :subscribe_to, :all),
+            subscription_opts: Keyword.get(opts, :subscription_opts, [])
+          )
+
+        for index <- 1..(get_in(opts, [:subscription_opts, :concurrency_limit]) || 1) do
+          concurrent_name = Module.concat(name, "#{index}")
+          child_spec = {Handler, [application, concurrent_name, __MODULE__, subscription, config]}
+
+          IO.puts("starting #{concurrent_name}")
+
+          {:ok, c_pid} =
+            DynamicSupervisor.start_child(
+              pid,
+              child_spec
+            )
+        end
+
+        {:ok, pid}
       end
 
       @doc """
@@ -521,7 +567,7 @@ defmodule Commanded.Event.Handler do
 
         default = %{
           id: {__MODULE__, application, name},
-          start: {Handler, :start_link, [application, name, __MODULE__, config]},
+          start: {__MODULE__, :start_link, [opts]},
           restart: :permanent,
           type: :worker
         }
@@ -609,40 +655,34 @@ defmodule Commanded.Event.Handler do
     :handler_state,
     :last_seen_event,
     :subscription,
-    :subscribe_timer
+    :subscribe_timer,
+    :concurrent_name
   ]
 
+  def start_link(opts \\ []) do
+    [application, handler_name, handler_module, subscription, opts] = opts
+    start_link(application, handler_name, handler_module, subscription, opts)
+  end
+
   @doc false
-  def start_link(application, handler_name, handler_module, opts \\ []) do
+  def start_link(application, handler_name, handler_module, subscription, opts \\ []) do
+    IO.puts("made it to start_link")
     {start_opts, handler_opts} = Keyword.split(opts, @start_opts)
 
     name = name(application, handler_name)
     consistency = consistency(handler_opts)
 
-    subscription =
-      Subscription.new(
-        application: application,
-        subscription_name: handler_name,
-        subscribe_from: Keyword.get(handler_opts, :start_from, :origin),
-        subscribe_to: Keyword.get(handler_opts, :subscribe_to, :all),
-        subscription_opts: Keyword.get(handler_opts, :subscription_opts, [])
-      )
-
     handler = %Handler{
       application: application,
-      handler_name: handler_name,
+      handler_name: Atom.to_string(handler_module) |> String.replace_prefix("Elixir.", ""),
       handler_module: handler_module,
       handler_state: Keyword.get(handler_opts, :state),
       consistency: consistency,
-      subscription: subscription
+      subscription: subscription,
+      concurrent_name: handler_name
     }
 
-    with {:ok, pid} <- Registration.start_link(application, name, __MODULE__, handler, start_opts) do
-      # Register the started event handler as a subscription with the given consistency
-      :ok = Subscriptions.register(application, handler_name, handler_module, pid, consistency)
-
-      {:ok, pid}
-    end
+    Registration.start_link(application, name, __MODULE__, handler, start_opts)
   end
 
   @doc false
@@ -1057,6 +1097,6 @@ defmodule Commanded.Event.Handler do
     end
   end
 
-  defp describe(%Handler{handler_module: handler_module}),
+  defp describe(%Handler{concurrent_name: handler_module}),
     do: inspect(handler_module)
 end
