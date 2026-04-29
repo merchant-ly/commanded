@@ -258,6 +258,19 @@ defmodule Commanded.SubscriptionsTest do
       assert Subscriptions.handled?(DefaultApp, "stream1", 2, consistency: [Handler1])
     end
 
+    test "should not succeed when requested handler is unknown or not registered" do
+      refute Subscriptions.handled?(DefaultApp, "stream1", 1, consistency: [UnknownHandler])
+
+      assert {:error, :timeout} ==
+               Subscriptions.wait_for(
+                 DefaultApp,
+                 "stream1",
+                 1,
+                 [consistency: [UnknownHandler]],
+                 100
+               )
+    end
+
     test "should wait for each configured handler consistency" do
       :ok = Subscriptions.register(DefaultApp, "handler1", Handler1, :strong)
       :ok = Subscriptions.register(DefaultApp, "handler2", Handler2, :strong)

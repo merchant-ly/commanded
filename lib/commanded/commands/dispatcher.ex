@@ -67,20 +67,6 @@ defmodule Commanded.Commands.Dispatcher do
     struct(Pipeline, Map.from_struct(payload))
   end
 
-  # Ignoring this dialyzer warning until dialyxir catches up on Elixir 1.18.x-otp-28
-  # Please file a bug in https://github.com/jeremyjh/dialyxir/issues with this message.
-  # Unknown error occurred:
-  #   %FunctionClauseError{
-  #     module: Dialyxir.Warnings.CallWithoutOpaque,
-  #     function: :format_long,
-  #     arity: 1,
-  #     kind: nil,
-  #     args: nil,
-  #     clauses: nil
-  #   }
-  # Open issue in dialyxir:
-  # https://github.com/jeremyjh/dialyxir/issues/568
-  @dialyzer {:nowarn_function, execute: 3}
   defp execute(%Pipeline{} = pipeline, %Payload{} = payload, %ExecutionContext{} = context) do
     %Pipeline{application: application, assigns: %{aggregate_uuid: aggregate_uuid}} = pipeline
     %Payload{aggregate_module: aggregate_module, timeout: timeout} = payload
@@ -114,7 +100,8 @@ defmodule Commanded.Commands.Dispatcher do
         {:exit, {{:nodedown, _node_name}, {GenServer, :call, _}}} ->
           {:error, :remote_node_down}
 
-        {:exit, _reason} ->
+        {:exit, reason} ->
+          Logger.error("[Commanded] aggregate execution failed: #{inspect(reason)}")
           {:error, :aggregate_execution_failed}
 
         nil ->

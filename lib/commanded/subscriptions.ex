@@ -207,21 +207,31 @@ defmodule Commanded.Subscriptions do
        ) do
     %Subscriptions{application: application} = state
 
-    Subscriptions.Registry.all(application)
-    |> Enum.reject(fn {_name, _module, pid} -> MapSet.member?(exclude, pid) end)
-    |> Enum.filter(fn {name, module, _pid} ->
-      # Optionally filter subscriptions to those provided by the `consistency` option
-      case consistency do
-        :strong ->
-          true
+    handlers =
+      Subscriptions.Registry.all(application)
+      |> Enum.reject(fn {_name, _module, pid} -> MapSet.member?(exclude, pid) end)
+      |> Enum.filter(fn {name, module, _pid} ->
+        # Optionally filter subscriptions to those provided by the `consistency` option
+        case consistency do
+          :strong ->
+            true
 
-        consistency when is_list(consistency) ->
-          Enum.member?(consistency, module) or Enum.member?(consistency, name)
-      end
-    end)
-    |> Enum.all?(fn {name, _module, _pid} ->
-      handled_by?(name, stream_uuid, stream_version, state)
-    end)
+          consistency when is_list(consistency) ->
+            Enum.member?(consistency, module) or Enum.member?(consistency, name)
+        end
+      end)
+
+    # When an explicit list of handlers is requested but none are registered,
+    # return false rather than silently succeeding with an empty Enum.all?/2.
+    case {consistency, handlers} do
+      {consistency, []} when is_list(consistency) ->
+        false
+
+      _ ->
+        Enum.all?(handlers, fn {name, _module, _pid} ->
+          handled_by?(name, stream_uuid, stream_version, state)
+        end)
+    end
   end
 
   # Has the named subscription handled the event for the given stream and version

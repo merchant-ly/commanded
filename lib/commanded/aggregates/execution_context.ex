@@ -108,7 +108,8 @@ defmodule Commanded.Aggregates.ExecutionContext do
     reply
   end
 
-  def format_reply({:error, error, _stacktrace}, _context, _aggregate) do
+  def format_reply({:error, error, stacktrace}, _context, _aggregate) do
+    IO.inspect(stacktrace, pretty: true, width: 100)
     {:error, error}
   end
 end
