@@ -832,6 +832,7 @@ defmodule Commanded.Event.Handler do
     :handler_module,
     :handler_state,
     :last_seen_event,
+    :stop_after_event,
     :subscription,
     :subscribe_timer
   ]
@@ -949,6 +950,56 @@ defmodule Commanded.Event.Handler do
     end
   end
 
+  @doc """
+  Instructs the handler to stop itself after processing the given event number.
+
+  The handler will finish processing events up to and including `event_number`,
+  then exit with `:normal`. Events beyond `event_number` in the current batch
+  are skipped (acked but not handled). This provides a precise stop point for
+  coordinating handoffs between projectors.
+
+  Returns the handler's last seen event number at the time of the call.
+  """
+  @impl GenServer
+  def handle_call({:stop_after_event, event_number}, _from, %Handler{} = state) do
+    Logger.info(
+      describe(state) <> " will stop after event ##{event_number}" <>
+        " (currently at ##{inspect(state.last_seen_event)})"
+    )
+
+    if is_integer(state.last_seen_event) and state.last_seen_event >= event_number do
+      # Already past the target — stop immediately
+      Logger.info(describe(state) <> " already at/past target, stopping now")
+      {:stop, :normal, {:ok, state.last_seen_event}, state}
+    else
+      {:reply, {:ok, state.last_seen_event}, %Handler{state | stop_after_event: event_number}}
+    end
+  end
+
+  @doc """
+  Executes a callback in the handler's process for handoff coordination.
+
+  The callback receives the handler's `last_seen_event` position and can
+  perform coordination work (e.g., telling another handler where to stop)
+  while this handler is guaranteed not to process any new events (it's
+  inside a `handle_call`).
+
+  Returns `{:ok, callback_result}` to the caller. The handler continues
+  running after the callback — stopping the handler is the responsibility
+  of the supervisor via `DynamicSupervisor.terminate_child`.
+
+  Used by `Commerce.Reprojection.handoff/3` during table swap coordination.
+  """
+  @impl GenServer
+  def handle_call({:handoff, callback}, _from, %Handler{} = state) when is_function(callback, 1) do
+    Logger.info(
+      describe(state) <> " executing handoff callback at event ##{inspect(state.last_seen_event)}"
+    )
+
+    result = callback.(state.last_seen_event)
+    {:reply, {:ok, result}, state}
+  end
+
   @doc false
   @impl GenServer
   def handle_info({:events, events}, state) do
@@ -970,6 +1021,10 @@ defmodule Commanded.Event.Handler do
 
       {:noreply, state}
     catch
+      {:stop_after_reached, %Handler{} = state} ->
+        Logger.info(describe(state) <> " stopped after event ##{state.last_seen_event}")
+        {:stop, :normal, state}
+
       {:error, reason} ->
         # Stop after event handling returned an error
         {:stop, reason, state}
@@ -1041,6 +1096,18 @@ defmodule Commanded.Event.Handler do
   end
 
   defp handle_event(event, context \\ %{}, handler)
+
+  # Stop immediately when an event arrives beyond the stop_after_event target.
+  # No need to ack — the subscription is deleted after the rebuild handoff.
+  defp handle_event(
+         %RecordedEvent{event_number: event_number},
+         _context,
+         %Handler{stop_after_event: target} = state
+       )
+       when is_integer(target) and event_number > target do
+    Logger.debug(describe(state) <> " stop target ##{target} reached, stopping at event ##{event_number}")
+    throw({:stop_after_reached, state})
+  end
 
   # Ignore already seen event.
   defp handle_event(
@@ -1403,11 +1470,22 @@ defmodule Commanded.Event.Handler do
     :ok = Subscription.ack_event(subscription, last_event)
     :ok = Subscriptions.ack_event(application, handler_name, consistency, last_event)
 
-    %Handler{state | last_seen_event: event_number}
+    state = %Handler{state | last_seen_event: event_number}
+
+    maybe_stop_after(state)
   end
 
   defp confirm_receipt(recorded_event, %Handler{} = state),
     do: confirm_receipt([recorded_event], state)
+
+  defp maybe_stop_after(%Handler{stop_after_event: nil} = state), do: state
+
+  defp maybe_stop_after(%Handler{stop_after_event: target, last_seen_event: seen} = state)
+       when seen >= target do
+    throw({:stop_after_reached, state})
+  end
+
+  defp maybe_stop_after(state), do: state
 
   # Determine the partition key for an event to ensure ordered processing when
   # necessary.
