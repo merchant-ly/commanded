@@ -87,6 +87,7 @@ defmodule Commanded.ProcessManagers.ProcessRouter do
 
   @impl GenServer
   def init(%State{} = state) do
+    Process.flag(:trap_exit, true)
     {:ok, state, {:continue, :subscribe_to_events}}
   end
 
@@ -261,6 +262,17 @@ defmodule Commanded.ProcessManagers.ProcessRouter do
 
     {:stop, reason, state}
   end
+
+  # Drain the instance supervisor synchronously before the router exits, ensuring all
+  # in-flight instances finish their current work (persist snapshot, ack event) before
+  # the router process is restarted and new instances are created for the same UUIDs.
+  @impl GenServer
+  def terminate(_reason, %State{supervisor: supervisor}) when not is_nil(supervisor) do
+    Process.unlink(supervisor)
+    DynamicSupervisor.stop(supervisor, :normal, 5000)
+  end
+
+  def terminate(_reason, _state), do: :ok
 
   defp subscribe_to_events(%State{} = state) do
     %State{subscription: subscription} = state
