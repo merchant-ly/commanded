@@ -294,6 +294,27 @@ defmodule Commanded.ProcessManagers.ProcessManagerInstance do
   end
 
   defp handle_event_error(
+         error,
+         %RecordedEvent{} = failed_event,
+         %FailureContext{} = failure_context,
+         %State{} = state
+       ) do
+    # During node shutdown, skip the error callback: its retry loop is recursive
+    # and could sleep through a backoff while the supervision tree tears down.
+    # Stop gracefully and leave the event unconfirmed so a survivor resumes it
+    # from the last checkpoint.
+    if node_stopping?() do
+      Logger.info(fn ->
+        describe(state) <> " is shutting down; skipping error handling and stopping gracefully"
+      end)
+
+      {:stop, :shutdown, state}
+    else
+      do_handle_event_error(error, failed_event, failure_context, state)
+    end
+  end
+
+  defp do_handle_event_error(
          {:error, _error} = error,
          %RecordedEvent{} = failed_event,
          %FailureContext{} = failure_context,
@@ -370,6 +391,11 @@ defmodule Commanded.ProcessManagers.ProcessManagerInstance do
         " due to: " <>
         inspect(reason, pretty: true)
     end)
+  end
+
+  # True once the BEAM has begun terminating (SIGTERM).
+  defp node_stopping? do
+    match?({:stopping, _}, :init.get_status())
   end
 
   defp handle_after_command([], _metadata, %State{} = state) do

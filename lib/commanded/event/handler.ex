@@ -1271,6 +1271,18 @@ defmodule Commanded.Event.Handler do
          %Handler{} = state,
          retry_fun
        ) do
+    # During node shutdown, skip the error callback: its retry loop is recursive
+    # and could sleep through a backoff while the supervision tree tears down.
+    # Stop gracefully and leave the event unconfirmed so a survivor resumes it
+    # from the last checkpoint.
+    if node_stopping?() do
+      Logger.info(
+        describe(state) <> " is shutting down; skipping error handling and stopping gracefully"
+      )
+
+      throw({:error, :shutdown})
+    end
+
     data =
       case maybe_failed_event do
         events when is_list(events) -> Enum.map(events, fn %RecordedEvent{data: data} -> data end)
@@ -1346,6 +1358,11 @@ defmodule Commanded.Event.Handler do
           module.error(error, data, failure_context)
       end
     end
+  end
+
+  # True once the BEAM has begun terminating (SIGTERM).
+  defp node_stopping? do
+    match?({:stopping, _}, :init.get_status())
   end
 
   defp log_event_error(error, %RecordedEvent{} = failed_event, %Handler{} = state) do
