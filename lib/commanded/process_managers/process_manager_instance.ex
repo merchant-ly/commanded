@@ -78,6 +78,7 @@ defmodule Commanded.ProcessManagers.ProcessManagerInstance do
   @doc false
   @impl GenServer
   def init(%State{} = state) do
+    Process.flag(:trap_exit, true)
     {:ok, state, {:continue, :fetch_state}}
   end
 
